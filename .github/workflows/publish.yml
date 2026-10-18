@@ -1,0 +1,60 @@
+# Publishes the package to npm with provenance when a plain SemVer tag (e.g. 0.3.0) is pushed.
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-*"
+
+# Provenance and trusted publishing need the OIDC token; nothing else is writable.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+
+    steps:
+      # actions/checkout v7.0.1, pinned by commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/setup-node v7.1.0, pinned by commit.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # The tag must match package.json, so a mistyped tag never publishes.
+      - name: Check the tag matches the version
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$package_version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $package_version" >&2
+            exit 1
+          fi
+
+      # Install the pinned build tools from the lockfile, without lifecycle scripts.
+      - run: npm ci --ignore-scripts
+
+      # The committed bundle must be exactly what the build produces.
+      - name: Rebuild and compare dist
+        run: |
+          npm run build
+          git diff --exit-code dist
+
+      - run: npm test
+
+      # Prereleases (0.4.0-beta.1) go to the "next" dist-tag, releases to "latest".
+      - name: Publish
+        run: |
+          dist_tag=latest
+          case "$GITHUB_REF_NAME" in *-*) dist_tag=next ;; esac
+          npm publish --provenance --access public --tag "$dist_tag" --ignore-scripts
+        env:
+          # Empty when npm trusted publishing is set up for this repo and workflow; npm then uses OIDC.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

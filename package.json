@@ -1,0 +1,52 @@
+{
+  "name": "simpledatalogs",
+  "version": "0.3.0",
+  "description": "Send events and log lines to simpledatalogs from browsers and Node.",
+  "keywords": [
+    "analytics",
+    "events",
+    "logging",
+    "telemetry",
+    "simpledatalogs"
+  ],
+  "homepage": "https://simpledatalogs.com/docs/sdks/javascript",
+  "bugs": {
+    "url": "https://github.com/XKD-Labs/simpledatalogs-js/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XKD-Labs/simpledatalogs-js.git"
+  },
+  "license": "MIT",
+  "author": "XKD Labs <mail@xkdlabs.com>",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./dist/simpledatalogs.min.js": "./dist/simpledatalogs.min.js"
+  },
+  "bin": {
+    "simpledatalogs": "bin/simpledatalogs.js"
+  },
+  "files": [
+    "src",
+    "dist",
+    "cli",
+    "bin"
+  ],
+  "jsdelivr": "dist/simpledatalogs.min.js",
+  "unpkg": "dist/simpledatalogs.min.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "build": "esbuild src/script-tag.js --bundle --minify --format=iife --target=es2022 --legal-comments=none --outfile=dist/simpledatalogs.min.js",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
