@@ -3,14 +3,15 @@
 import { resolveAutocaptureFlags, startAutocapture } from './autocapture.js'
 
 /** This SDK's version, sent in the User-Agent where the runtime allows one. */
-export const SDK_VERSION = '0.3.0'
+export const SDK_VERSION = '0.3.1'
 
 /** The production ingest host. */
 export const DEFAULT_ENDPOINT = 'https://edge.simpledatalogs.com'
 
-// The ingest API sender defaults; apps flush every 30 s or at 50 events, requests stay under 256 KB.
+// The ingest API sender defaults; the first batch goes after 1 s so a new setup shows data at once, then every 30 s or at 50 events, requests stay under 256 KB.
 const DEFAULT_SETTINGS = {
   endpoint: DEFAULT_ENDPOINT,
+  firstFlushDelayMs: 1_000,
   flushIntervalMs: 30_000,
   maxBatchEvents: 50,
   maxRequestBytes: 256_000,
@@ -83,6 +84,7 @@ export class SimpleDataLogsClient {
   #flushTimer = null
   #flushTimerDueAtMs = Infinity
   #runningFlush = null
+  #hasFlushed = false
   #warnedKinds = new Set()
   #removePageListeners = () => {}
   #stopAutocapture = () => {}
@@ -189,6 +191,7 @@ export class SimpleDataLogsClient {
     // Join a flush that is already running, so one request is in flight at a time.
     if (this.#runningFlush) return this.#runningFlush
 
+    this.#hasFlushed = true
     this.#runningFlush = this.#flushUntilEmpty()
       .catch((error) => this.#warnOnce('flush_crash', `flush failed unexpectedly: ${error}`))
       .finally(() => {
@@ -290,9 +293,9 @@ export class SimpleDataLogsClient {
     this.#trimOutbox()
     this.#schedulePersist()
 
-    // A full batch goes now; otherwise the interval timer picks it up.
+    // A full batch goes now; the client's first batch goes soon; otherwise the interval timer picks it up.
     const unsentCount = this.#outbox.length - this.#inFlightEventIds.size
-    this.#scheduleFlush(unsentCount >= this.#settings.maxBatchEvents ? 0 : this.#settings.flushIntervalMs)
+    this.#scheduleFlush(unsentCount >= this.#settings.maxBatchEvents ? 0 : this.#nextFlushDelayMs())
   }
 
   // Drops the oldest events while the outbox is over its event or byte cap.
@@ -443,6 +446,12 @@ export class SimpleDataLogsClient {
 
     const pauseLeftMs = this.#pausedUntilMs - this.#now()
     this.#scheduleFlush(pauseLeftMs > 0 ? pauseLeftMs : this.#settings.flushIntervalMs)
+  }
+
+  // The wait before the next batch: short until the first batch was sent, then the interval.
+  #nextFlushDelayMs() {
+    if (this.#hasFlushed) return this.#settings.flushIntervalMs
+    return Math.min(this.#settings.firstFlushDelayMs, this.#settings.flushIntervalMs)
   }
 
   // Runs flush after delayMs, unless a timer is already due sooner.

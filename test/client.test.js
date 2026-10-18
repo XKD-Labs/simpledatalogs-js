@@ -9,12 +9,12 @@ import { START_MS, answer, makeHarness, memoryStorage, settle } from './harness.
 // A UUID of any version, as event_id must be.
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
-test('track sends an event with id, time, identity and scalar props after the 30 s interval', async () => {
+test('track sends an event with id, time, identity and scalar props; the first batch after 1 s', async () => {
   const harness = makeHarness({ clientOptions: { deviceId: ' device-1 ' } })
   harness.client.setUserId(42)
 
   harness.client.track('screenshot_taken', { format: 'png', size: 12, is_retina: true, nested: { a: 1 }, ratio: Infinity })
-  await harness.advance(29_999)
+  await harness.advance(999)
   assert.equal(harness.requests.length, 0)
 
   await harness.advance(1)
@@ -40,6 +40,22 @@ test('track sends an event with id, time, identity and scalar props after the 30
   })
   assert.equal(harness.client.pendingCount, 0)
   assert.ok(harness.warnings.some((warning) => warning.includes('"nested"')))
+})
+
+test('after the first batch, later events wait for the 30 s interval', async () => {
+  const harness = makeHarness()
+
+  harness.client.track('first')
+  await harness.advance(1_000)
+  assert.equal(harness.requests.length, 1)
+
+  harness.client.track('second')
+  await harness.advance(29_999)
+  assert.equal(harness.requests.length, 1)
+
+  await harness.advance(1)
+  assert.equal(harness.requests.length, 2)
+  assert.equal(harness.requests[1].events[0].event, 'second')
 })
 
 test('log sends level, message and props without an event name', async () => {

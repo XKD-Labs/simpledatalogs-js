@@ -2,7 +2,13 @@
 
 All notable changes to the `simpledatalogs` npm package. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package uses [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - Unreleased
+## [0.3.1] - Unreleased
+
+### Changed
+
+- The first batch after the client starts goes out after 1 second instead of 30, so a new setup shows its first event at once; later batches keep the 30-second interval.
+
+## [0.3.0] - 2026-10-19
 
 The first public release.
 

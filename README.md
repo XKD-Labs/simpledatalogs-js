@@ -56,10 +56,10 @@ Pass an object for finer control: `autocapture: { errors: false, outboundLinks: 
 One minified file (`dist/simpledatalogs.min.js`, ~7 KB gzipped) for sites without a bundler. The tag is the opt-in, so autocapture is on:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/simpledatalogs@0.3.0/dist/simpledatalogs.min.js" data-key="sdl_pub_…" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/simpledatalogs@0.3.1/dist/simpledatalogs.min.js" data-key="sdl_pub_…" defer></script>
 ```
 
-- unpkg works too: `https://unpkg.com/simpledatalogs@0.3.0/dist/simpledatalogs.min.js`.
+- unpkg works too: `https://unpkg.com/simpledatalogs@0.3.1/dist/simpledatalogs.min.js`.
 - Attributes: `data-key` (required), `data-endpoint`, `data-autocapture="false"` (manual calls only), `data-outbound-links="true"`.
 - Your own calls: `simpledatalogs.track('signup')`, `simpledatalogs.log('error', 'boom')`.
 - Build it with `npm ci && npm run build`; `dist/` is committed so tests and the CDN see the same file.
