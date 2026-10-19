@@ -3,7 +3,7 @@
 import { resolveAutocaptureFlags, startAutocapture } from './autocapture.js'
 
 /** This SDK's version, sent in the User-Agent where the runtime allows one. */
-export const SDK_VERSION = '0.3.1'
+export const SDK_VERSION = '0.4.0'
 
 /** The production ingest host. */
 export const DEFAULT_ENDPOINT = 'https://edge.simpledatalogs.com'

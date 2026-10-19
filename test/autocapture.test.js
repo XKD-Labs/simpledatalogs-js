@@ -11,10 +11,14 @@ import { makeHarness, memoryStorage, settle } from './harness.js'
 function fakePage({ href = 'https://shop.test/pricing?utm_source=news&utm_campaign=launch&secret=1', referrer = 'https://search.test/results?q=x', title = 'Pricing', navigator = {} } = {}) {
   const listeners = { window: new Map(), document: new Map() }
 
-  // Adds and removes listeners by type, keeping one per type is enough for these tests.
+  // Adds and removes listeners by type; a type may hold several (outbound and data-track clicks).
   const listenerTarget = (name) => ({
-    addEventListener: (type, listener) => listeners[name].set(type, listener),
-    removeEventListener: (type) => listeners[name].delete(type),
+    addEventListener: (type, listener) => listeners[name].set(type, [...(listeners[name].get(type) ?? []), listener]),
+    removeEventListener: (type, listener) => {
+      const remaining = (listeners[name].get(type) ?? []).filter((kept) => kept !== listener)
+      if (remaining.length === 0) listeners[name].delete(type)
+      else listeners[name].set(type, remaining)
+    },
   })
 
   const location = new URL(href)
@@ -35,7 +39,7 @@ function fakePage({ href = 'https://shop.test/pricing?utm_source=news&utm_campai
   }
   const documentTarget = { ...listenerTarget('document'), referrer, title, visibilityState: 'visible' }
 
-  return { windowTarget, documentTarget, listeners, location, fire: (name, type, payload) => listeners[name].get(type)?.(payload) }
+  return { windowTarget, documentTarget, listeners, location, fire: (name, type, payload) => (listeners[name].get(type) ?? []).forEach((listener) => listener(payload)) }
 }
 
 // A harness whose client runs autocapture on a fake page.
@@ -158,7 +162,7 @@ test('uncaught errors and unhandled rejections become error-level logs, bounded 
 
 test('outbound link clicks are tracked only when turned on, and only for other hosts', async () => {
   const harness = pageHarness({ autocapture: { pageViews: false, sessions: false, outboundLinks: true } })
-  const linkTo = (href) => ({ target: { closest: () => ({ getAttribute: () => href }) } })
+  const linkTo = (href) => ({ target: { closest: (selector) => (selector === 'a[href]' ? { getAttribute: () => href } : null) } })
 
   harness.page.fire('document', 'click', linkTo('https://partner.test/offer?ref=me'))
   harness.page.fire('document', 'click', linkTo('/same-site'))
@@ -167,6 +171,39 @@ test('outbound link clicks are tracked only when turned on, and only for other h
   const clicks = await sentEvents(harness)
   assert.equal(clicks.length, 1)
   assert.deepEqual(clicks[0].props, { url: 'https://partner.test/offer', host: 'partner.test', path: '/pricing' })
+})
+
+test('data-track clicks send the named event with its data-track-* props and the path', async () => {
+  const harness = pageHarness({ autocapture: { pageViews: false, sessions: false } })
+
+  // An element as the DOM gives it: its own attributes, found through closest().
+  const trackedElement = (attributes) => ({
+    getAttribute: (attributeName) => attributes[attributeName] ?? null,
+    getAttributeNames: () => Object.keys(attributes),
+  })
+  const clickOn = (element) => ({ target: { closest: (selector) => (selector === '[data-track]' ? element : null) } })
+
+  harness.page.fire('document', 'click', clickOn(trackedElement({ 'data-track': ' signup ', 'data-track-plan': 'pro', 'data-track-cta-place': 'hero', class: 'btn' })))
+  harness.page.fire('document', 'click', clickOn(trackedElement({ 'data-track': '' })))
+  harness.page.fire('document', 'click', clickOn(null))
+
+  const clicks = await sentEvents(harness)
+  assert.equal(clicks.length, 1)
+  assert.equal(clicks[0].event, 'signup')
+  assert.deepEqual(clicks[0].props, { plan: 'pro', cta_place: 'hero', path: '/pricing' })
+})
+
+test('without sessions, only the first page view of a page load carries the referrer and UTM tags', async () => {
+  const harness = pageHarness({ autocapture: { sessions: false, errors: false } })
+
+  harness.page.windowTarget.history.pushState({}, '', '/docs')
+  await Promise.resolve()
+
+  const views = await sentEvents(harness)
+  assert.deepEqual(views.map((event) => event.event), ['page_view', 'page_view'])
+  assert.equal(views[0].props.utm_source, 'news')
+  assert.equal(views[1].props.utm_source, undefined)
+  assert.equal(views[1].props.referrer_host, undefined)
 })
 
 test('Do Not Track and Global Privacy Control turn autocapture off; manual calls still go', async () => {

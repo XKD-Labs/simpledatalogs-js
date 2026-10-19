@@ -1,6 +1,6 @@
 {
   "name": "simpledatalogs",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Send events and log lines to simpledatalogs from browsers and Node.",
   "keywords": [
     "analytics",

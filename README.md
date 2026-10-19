@@ -44,6 +44,7 @@ const sdl = init({ key: 'sdl_pub_…', autocapture: true })
 | `sessions` | on | `session_start`, a `session_id` on every event, and `session_end` (props `duration_s`, `page_views`, stamped at the last activity) after 30 idle minutes |
 | `errors` | on | Uncaught errors and unhandled rejections as `error` log lines with `stack`, `file`, `line`, `path`; at most 5 per message and 50 per page |
 | `outboundLinks` | off | `outbound_click` with `url` (no query) and `host` for links to other hosts |
+| `trackedClicks` | on | A click on an element with `data-track="name"` sends that event, with its `data-track-*` attributes as props and `path` |
 | `uncaughtExceptions` | on (Node) | A `critical` log line, a flush of up to 2 s, then exit code 1 as Node would; with other listeners it only sends |
 | `respectDoNotTrack` | on | With Do Not Track or Global Privacy Control on, nothing is captured automatically; your own calls still go |
 
@@ -53,14 +54,16 @@ Pass an object for finer control: `autocapture: { errors: false, outboundLinks: 
 
 ## Script tag
 
-One minified file (`dist/simpledatalogs.min.js`, ~7 KB gzipped) for sites without a bundler. The tag is the opt-in, so autocapture is on:
+One minified file (`dist/simpledatalogs.min.js`, ~8 KB gzipped) for sites without a bundler. The tag is the opt-in, so autocapture is on, in **web mode**: no cookies and no browser storage, so no consent banner is needed for it.
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/simpledatalogs@0.3.1/dist/simpledatalogs.min.js" data-key="sdl_pub_…" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/simpledatalogs@0.4.0/dist/simpledatalogs.min.js" data-key="sdl_pub_…" defer></script>
 ```
 
-- unpkg works too: `https://unpkg.com/simpledatalogs@0.3.1/dist/simpledatalogs.min.js`.
-- Attributes: `data-key` (required), `data-endpoint`, `data-autocapture="false"` (manual calls only), `data-outbound-links="true"`.
+- unpkg works too: `https://unpkg.com/simpledatalogs@0.4.0/dist/simpledatalogs.min.js`.
+- Attributes: `data-key` (required), `data-endpoint`, `data-autocapture="false"` (manual calls only), `data-outbound-links="false"`, `data-storage="true"` (a stored outbox and tab sessions, as in the npm package).
+- Visitors and visits are counted by the server from a daily-rotating hash, so the page sends only page views, clicks and errors; events wait in memory and go out on page hide.
+- Clicks: `<button data-track="signup" data-track-plan="pro">` sends `signup` with `plan` and the page path.
 - Your own calls: `simpledatalogs.track('signup')`, `simpledatalogs.log('error', 'boom')`.
 - Build it with `npm ci && npm run build`; `dist/` is committed so tests and the CDN see the same file.
 

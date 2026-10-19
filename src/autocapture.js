@@ -1,4 +1,4 @@
-/** Opt-in automatic capture: page views (SPA too), sessions, referrer and UTM, unhandled errors, outbound clicks, and Node crashes. */
+/** Opt-in automatic capture: page views (SPA too), sessions, referrer and UTM, unhandled errors, outbound and data-track clicks, and Node crashes. */
 
 /** The features `autocapture: true` turns on; outbound clicks and Do Not Track handling are set apart. */
 export const AUTOCAPTURE_DEFAULTS = {
@@ -6,6 +6,7 @@ export const AUTOCAPTURE_DEFAULTS = {
   sessions: true,
   errors: true,
   outboundLinks: false,
+  trackedClicks: true,
   uncaughtExceptions: true,
   respectDoNotTrack: true,
 }
@@ -24,6 +25,9 @@ const UTM_PARAMETERS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 
 
 // Bounds on error capture, so an error thrown in a loop can't flood the outbox.
 const ERROR_LIMITS = { perPage: 50, perMessage: 5, stackChars: 4_000, textChars: 1_000 }
+
+// Bounds on a data-track click's props, so markup can't grow an event without limit.
+const TRACKED_CLICK_LIMITS = { props: 10, textChars: 200 }
 
 // A crashing Node process waits at most this long for the last flush.
 const CRASH_FLUSH_MS = 2_000
@@ -62,6 +66,7 @@ export function startAutocapture(client, flags, context) {
     if (flags.pageViews) stopFunctions.push(capturePageViews(client, windowTarget, documentTarget, session))
     if (flags.errors) stopFunctions.push(captureBrowserErrors(client, windowTarget))
     if (flags.outboundLinks) stopFunctions.push(captureOutboundClicks(client, windowTarget, documentTarget))
+    if (flags.trackedClicks) stopFunctions.push(captureTrackedClicks(client, windowTarget, documentTarget))
   } else if (flags.uncaughtExceptions && context.processTarget) {
     stopFunctions.push(captureUncaughtExceptions(client, context))
   }
@@ -234,11 +239,13 @@ function capturePageViews(client, windowTarget, documentTarget, session) {
     const path = pagePath(location)
     if (path === lastPath) return
 
+    // Without sessions, the first page view of this page load is the landing one.
+    const isFirstOfLoad = lastPath === null
     lastPath = path
     session?.markActivity()
 
-    // The session's first page view also says where the visitor came from.
-    const isFirstPageView = session ? session.isFirstPageView : true
+    // The session's first page view says where the visitor came from; without sessions, this page load's first one does.
+    const isFirstPageView = session ? session.isFirstPageView : isFirstOfLoad
     const props = { path, ...titleProp(documentTarget), ...(isFirstPageView ? landingProps(location, documentTarget) : {}) }
 
     client.track('page_view', props)
@@ -345,6 +352,41 @@ function captureOutboundClicks(client, windowTarget, documentTarget) {
   documentTarget?.addEventListener?.('click', onClick, { capture: true, passive: true })
 
   return () => documentTarget?.removeEventListener?.('click', onClick, { capture: true })
+}
+
+// Sends the event a clicked element names in data-track, with its data-track-* attributes as props: <button data-track="signup" data-track-plan="pro">.
+function captureTrackedClicks(client, windowTarget, documentTarget) {
+  const onClick = (clickEvent) => {
+    try {
+      const trackedElement = clickEvent?.target?.closest?.('[data-track]')
+      const eventName = truncate(String(trackedElement?.getAttribute?.('data-track') ?? '').trim(), TRACKED_CLICK_LIMITS.textChars)
+      if (eventName === '') return
+
+      client.track(eventName, { ...trackedProps(trackedElement), path: pagePath(windowTarget.location) })
+    } catch {
+      // A malformed element is not worth a warning.
+    }
+  }
+
+  documentTarget?.addEventListener?.('click', onClick, { capture: true, passive: true })
+
+  return () => documentTarget?.removeEventListener?.('click', onClick, { capture: true })
+}
+
+// The data-track-* attributes of an element as props (data-track-plan → plan), bounded.
+function trackedProps(trackedElement) {
+  const props = {}
+  const attributeNames = typeof trackedElement?.getAttributeNames === 'function' ? trackedElement.getAttributeNames() : []
+
+  for (const attributeName of attributeNames) {
+    if (!attributeName.startsWith('data-track-')) continue
+    if (Object.keys(props).length >= TRACKED_CLICK_LIMITS.props) break
+
+    const propName = attributeName.slice('data-track-'.length).replaceAll('-', '_')
+    if (propName !== '') props[propName] = truncate(String(trackedElement.getAttribute(attributeName) ?? ''), TRACKED_CLICK_LIMITS.textChars)
+  }
+
+  return props
 }
 
 // Logs an uncaught exception as critical, flushes for up to 2 s, then exits with code 1 as Node would have.

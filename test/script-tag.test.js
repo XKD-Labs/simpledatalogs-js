@@ -77,16 +77,36 @@ test('the tag reads data-key and data-endpoint, starts autocapture, and exposes 
   const events = requests.flatMap((request) => request.events)
   assert.equal(requests[0].url, 'http://localhost:4001/v1/ingest')
   assert.equal(requests[0].headers.Authorization, 'Bearer sdl_pub_tag_key')
-  assert.deepEqual(events.map((event) => event.event), ['session_start', 'page_view', 'signup'])
-  assert.equal(events[1].props.utm_source, 'ads')
+  assert.deepEqual(events.map((event) => event.event), ['page_view', 'signup'])
+  assert.equal(events[0].props.utm_source, 'ads')
   assert.equal(page.simpledatalogs.version, SDK_VERSION)
 })
 
-test('data-autocapture="false" keeps only the manual calls, and outbound clicks need data-outbound-links', async () => {
+test('web mode: the tag stores nothing and sends no session id; data-storage="true" brings both back', async () => {
+  const webMode = await runBundleInPage({ 'data-key': 'sdl_pub_tag_key' })
+  webMode.page.simpledatalogs.track('signup')
+  await webMode.page.simpledatalogs.flush()
+  await settle()
+
+  const webEvents = webMode.requests.flatMap((request) => request.events)
+  assert.equal(webMode.page.localStorage.length, 0)
+  assert.equal(webMode.page.sessionStorage.length, 0)
+  assert.ok(webEvents.every((event) => event.session_id === undefined))
+
+  const stored = await runBundleInPage({ 'data-key': 'sdl_pub_tag_key', 'data-storage': 'true' })
+  await stored.page.simpledatalogs.flush()
+  await settle()
+
+  const storedEvents = stored.requests.flatMap((request) => request.events)
+  assert.equal(storedEvents[0].event, 'session_start')
+  assert.ok(storedEvents.every((event) => typeof event.session_id === 'string'))
+})
+
+test('data-autocapture="false" keeps only the manual calls', async () => {
   const quiet = await runBundleInPage({ 'data-key': 'sdl_pub_tag_key', 'data-autocapture': 'false' })
   await quiet.page.simpledatalogs.flush()
   assert.equal(quiet.requests.length, 0)
 
-  const withClicks = await runBundleInPage({ 'data-key': 'sdl_pub_tag_key', 'data-outbound-links': 'true' })
+  const withClicks = await runBundleInPage({ 'data-key': 'sdl_pub_tag_key' })
   assert.equal(typeof withClicks.listeners.get('document:click'), 'function')
 })

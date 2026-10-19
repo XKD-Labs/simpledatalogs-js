@@ -22,7 +22,7 @@ const FRAMEWORKS = {
 }
 
 // The script tag URL, pinned to this package's version.
-const SCRIPT_TAG_VERSION = '0.3.1'
+const SCRIPT_TAG_VERSION = '0.4.0'
 
 /** Detects the framework of the project in `projectDir`, or null when none is recognized. */
 export function detectFramework(projectDir) {
@@ -283,7 +283,7 @@ export async function sendTestEvent({ endpoint, ingestKey, framework, fetchFunct
   try {
     const response = await fetchFunction(`${endpoint.replace(/\/+$/, '')}/v1/ingest`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${ingestKey}`, 'Content-Type': 'application/json', 'User-Agent': 'simpledatalogs-cli/0.3.1' },
+      headers: { Authorization: `Bearer ${ingestKey}`, 'Content-Type': 'application/json', 'User-Agent': 'simpledatalogs-cli/0.4.0' },
       body: JSON.stringify([testEvent]),
       signal: AbortSignal.timeout(10_000),
     })
