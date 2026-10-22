@@ -1,4 +1,7 @@
-/** Opt-in automatic capture: page views (SPA too), sessions, referrer and UTM, unhandled errors, outbound and data-track clicks, and Node crashes. */
+/** Opt-in automatic capture: page views (SPA too), sessions, referrer and UTM, unhandled errors, outbound and data-track clicks, React Native app sessions and Node crashes. */
+
+import { watchProcessCrashes } from './exceptions.js'
+import { describeValue, stripQuery, truncate } from './text.js'
 
 /** The features `autocapture: true` turns on; outbound clicks and Do Not Track handling are set apart. */
 export const AUTOCAPTURE_DEFAULTS = {
@@ -29,9 +32,6 @@ const ERROR_LIMITS = { perPage: 50, perMessage: 5, stackChars: 4_000, textChars:
 // Bounds on a data-track click's props, so markup can't grow an event without limit.
 const TRACKED_CLICK_LIMITS = { props: 10, textChars: 200 }
 
-// A crashing Node process waits at most this long for the last flush.
-const CRASH_FLUSH_MS = 2_000
-
 /** Turns the `autocapture` option (false, true or an object of flags) into a full set of flags, or null when off. */
 export function resolveAutocaptureFlags(option) {
   if (option === true) return { ...AUTOCAPTURE_DEFAULTS }
@@ -53,10 +53,12 @@ export function startAutocapture(client, flags, context) {
   const windowTarget = context.pageTargets?.window
   const documentTarget = context.pageTargets?.document
 
-  // A real page has a location; anything else (Node, a test double) gets the Node features only.
+  // A real page has a location; React Native gets app sessions; anything else (Node, a test double) gets the Node features only.
   const isBrowserPage = typeof windowTarget?.location?.href === 'string'
 
-  if (isBrowserPage) {
+  if (context.runtime === 'react-native') {
+    if (flags.sessions) stopFunctions.push(new AppSession(client, context).start(context.initialAppState, context.addAppStateListener))
+  } else if (isBrowserPage) {
     // Do Not Track and Global Privacy Control turn every automatic event off; the app's own calls still go.
     if (flags.respectDoNotTrack && isDoNotTrackOn(windowTarget)) return () => {}
 
@@ -228,6 +230,64 @@ export class TabSession {
   }
 }
 
+/** One app session for React Native: session_start at launch, and a new session when the app returns after 30 minutes in the background. */
+export class AppSession {
+  #client
+  #now
+  #state = null
+  #backgroundedAtMs = null
+
+  /** Keeps the client and the clock. */
+  constructor(client, context) {
+    this.#client = client
+    this.#now = context.now
+  }
+
+  /** Starts a session unless the app launched in the background, and follows app state changes; returns the stop function. */
+  start(initialAppState, addAppStateListener) {
+    // A headless launch (a background task) starts no session until the app comes to the foreground.
+    if (initialAppState === undefined || initialAppState === null || initialAppState === 'active') this.#beginSession(this.#now())
+    else this.#backgroundedAtMs = this.#now()
+
+    return addAppStateListener?.((appStateValue) => this.handleAppStateChange(appStateValue)) ?? (() => {})
+  }
+
+  /** Notes when the app went to the background; on return after 30 minutes or more, ends the old session and starts a new one. */
+  handleAppStateChange(appStateValue) {
+    const nowMs = this.#now()
+
+    if (appStateValue === 'background') {
+      this.#backgroundedAtMs ??= nowMs
+      return
+    }
+
+    if (appStateValue !== 'active') return
+
+    // A long stay in the background ends the session where the app left the foreground.
+    const wasAwayLong = this.#backgroundedAtMs !== null && nowMs - this.#backgroundedAtMs >= SESSION_TIMEOUT_MS
+    if (this.#state !== null && wasAwayLong) this.#endSession(this.#backgroundedAtMs)
+
+    this.#backgroundedAtMs = null
+    if (this.#state === null) this.#beginSession(nowMs)
+  }
+
+  // Starts a session: a new id on every later event, then session_start.
+  #beginSession(nowMs) {
+    this.#state = { id: newSessionId(), startedAtMs: nowMs }
+    this.#client.setSessionId(this.#state.id)
+    this.#client.track('session_start')
+  }
+
+  // Sends session_end stamped when the app left the foreground, with the session's length, then forgets it.
+  #endSession(endedAtMs) {
+    const durationSeconds = Math.max(0, Math.round((endedAtMs - this.#state.startedAtMs) / 1000))
+
+    this.#client.track('session_end', { duration_s: durationSeconds }, { timestamp: endedAtMs })
+    this.#client.setSessionId(null)
+    this.#state = null
+  }
+}
+
 // Sends page_view on load and on every SPA route change (pushState, replaceState, popstate, hashchange) that changes the path.
 function capturePageViews(client, windowTarget, documentTarget, session) {
   const historyTarget = windowTarget.history
@@ -391,28 +451,9 @@ function trackedProps(trackedElement) {
 
 // Logs an uncaught exception as critical, flushes for up to 2 s, then exits with code 1 as Node would have.
 function captureUncaughtExceptions(client, context) {
-  const processTarget = context.processTarget
-
-  const onUncaughtException = (error) => {
+  return watchProcessCrashes(context, (error) => {
     client.log('critical', error instanceof Error ? errorText(error) : `Uncaught: ${describeValue(error)}`, { source: 'uncaughtException', ...stackProp(error) })
-
-    // With other listeners the app decides what happens next; we only send.
-    const isOnlyListener = (processTarget.listenerCount?.('uncaughtException') ?? 1) <= 1
-    if (!isOnlyListener) {
-      client.flush()
-      return
-    }
-
-    // Alone, we keep Node's default: print the error and exit with code 1, after a bounded flush.
-    context.logger?.error?.(error)
-
-    const flushDeadline = new Promise((resolve) => context.timers.setTimeout(resolve, CRASH_FLUSH_MS))
-    Promise.race([client.flush(), flushDeadline]).finally(() => processTarget.exit(1))
-  }
-
-  processTarget.on('uncaughtException', onUncaughtException)
-
-  return () => processTarget.removeListener?.('uncaughtException', onUncaughtException)
+  })
 }
 
 // The path a page view reports: the pathname, plus the hash for hash routers (#/…); never the query string.
@@ -466,27 +507,6 @@ function errorText(error) {
 // The stack trace as a prop, bounded, when the value has one.
 function stackProp(value) {
   return typeof value?.stack === 'string' && value.stack !== '' ? { stack: truncate(value.stack, ERROR_LIMITS.stackChars) } : {}
-}
-
-// A short text for any thrown or rejected value.
-function describeValue(value) {
-  if (typeof value === 'string') return value
-
-  try {
-    return JSON.stringify(value) ?? String(value)
-  } catch {
-    return String(value)
-  }
-}
-
-// A script URL without its query or fragment, which can carry tokens.
-function stripQuery(urlText) {
-  return urlText.split(/[?#]/)[0]
-}
-
-// Text cut to at most maxChars characters.
-function truncate(text, maxChars) {
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`
 }
 
 // sessionStorage when the page allows it; null when blocked (the session then lives in memory).

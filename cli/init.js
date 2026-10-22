@@ -22,7 +22,7 @@ const FRAMEWORKS = {
 }
 
 // The script tag URL, pinned to this package's version.
-const SCRIPT_TAG_VERSION = '0.4.0'
+const SCRIPT_TAG_VERSION = '0.5.0'
 
 /** Detects the framework of the project in `projectDir`, or null when none is recognized. */
 export function detectFramework(projectDir) {
@@ -118,12 +118,12 @@ function planVite(projectDir, ingestKey, plan) {
   addModuleInit(projectDir, entryPath, null, initLine, plan)
 }
 
-// React Native / Expo: an EXPO_PUBLIC_ env var and a module exporting the client; there are no page views, so no autocapture.
+// React Native / Expo: an EXPO_PUBLIC_ env var and a module exporting the client; AppState flushes on background and drives sessions.
 function planExpo(projectDir, ingestKey, plan) {
   addEnvChange(projectDir, '.env', 'EXPO_PUBLIC_SIMPLEDATALOGS_KEY', ingestKey, plan)
 
   const extension = existsSync(join(projectDir, 'tsconfig.json')) ? 'ts' : 'js'
-  const snippet = `import { init } from 'simpledatalogs'\n\n// Import this module once at startup, then sdl.track('signup') anywhere.\nexport const sdl = init({ key: process.env.EXPO_PUBLIC_SIMPLEDATALOGS_KEY })\n`
+  const snippet = `import { AppState } from 'react-native'\nimport { init } from 'simpledatalogs'\n\n// Import this module once at startup, then sdl.track('signup') anywhere; AppState flushes on background and starts sessions.\nexport const sdl = init({ key: process.env.EXPO_PUBLIC_SIMPLEDATALOGS_KEY, appState: AppState, autocapture: true })\n`
 
   addNewFile(projectDir, `simpledatalogs.${extension}`, snippet, plan)
   plan.notes.push(`Import ./simpledatalogs once in your root layout or App.${extension === 'ts' ? 'tsx' : 'js'}. React Native has no page views; track screens with sdl.track('screen_view', { screen }).`)
@@ -283,7 +283,7 @@ export async function sendTestEvent({ endpoint, ingestKey, framework, fetchFunct
   try {
     const response = await fetchFunction(`${endpoint.replace(/\/+$/, '')}/v1/ingest`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${ingestKey}`, 'Content-Type': 'application/json', 'User-Agent': 'simpledatalogs-cli/0.4.0' },
+      headers: { Authorization: `Bearer ${ingestKey}`, 'Content-Type': 'application/json', 'User-Agent': 'simpledatalogs-cli/0.5.0' },
       body: JSON.stringify([testEvent]),
       signal: AbortSignal.timeout(10_000),
     })

@@ -106,3 +106,23 @@ export function memoryStorage(initialItems = {}) {
     items,
   }
 }
+
+// An async storage adapter like React Native's AsyncStorage: getItem, setItem and removeItem return Promises; every write is recorded.
+export function asyncMemoryStorage(initialItems = {}) {
+  const items = new Map(Object.entries(initialItems))
+  const writes = []
+
+  return {
+    getItem: async (storageKey) => (items.has(storageKey) ? items.get(storageKey) : null),
+    setItem: async (storageKey, value) => {
+      items.set(storageKey, String(value))
+      writes.push(`set:${storageKey}`)
+    },
+    removeItem: async (storageKey) => {
+      items.delete(storageKey)
+      writes.push(`remove:${storageKey}`)
+    },
+    items,
+    writes,
+  }
+}

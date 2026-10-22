@@ -1,9 +1,13 @@
-/** simpledatalogs for browsers and Node: batches events and log lines to the ingest API and never blocks or breaks the host. */
+/** simpledatalogs for browsers, workers, React Native and Node: batches events, log lines and exceptions to the ingest API and never blocks or breaks the host. */
 
-import { resolveAutocaptureFlags, startAutocapture } from './autocapture.js'
+import { isDoNotTrackOn, resolveAutocaptureFlags, startAutocapture } from './autocapture.js'
+import { exceptionFields, installCrashHandlers } from './exceptions.js'
+import { defaultPageTargets, defaultProcessTarget, defaultStorage, isUsableStorage, isWebStorage, resolveRuntime } from './runtime.js'
+
+export { chromeStorageAdapter } from './runtime.js'
 
 /** This SDK's version, sent in the User-Agent where the runtime allows one. */
-export const SDK_VERSION = '0.4.0'
+export const SDK_VERSION = '0.5.0'
 
 /** The production ingest host. */
 export const DEFAULT_ENDPOINT = 'https://edge.simpledatalogs.com'
@@ -21,6 +25,12 @@ const DEFAULT_SETTINGS = {
   requestTimeoutMs: 15_000,
 }
 
+// An extension's service worker is stopped after 30 idle seconds, so it sends every 10 s instead of every 30 s.
+const RUNTIME_SETTINGS = { worker: { flushIntervalMs: 10_000 } }
+
+// An async storage (AsyncStorage, chrome.storage) is written at most once a second while events arrive.
+const ASYNC_PERSIST_DELAY_MS = 1_000
+
 // Backoff with full jitter from 1 s to 5 min, Retry-After as a floor, and slow re-probes after a 401.
 const RETRY_POLICY = {
   initialMs: 1_000,
@@ -31,7 +41,7 @@ const RETRY_POLICY = {
   invalidKeyProbeMs: 600_000,
 }
 
-// Every outbox in browser storage starts with this, one per page load, so tabs never overwrite each other.
+// Every stored outbox starts with this; Web Storage gets one per page load, so tabs never overwrite each other, and an async storage one per key.
 const STORAGE_PREFIX = 'simpledatalogs:outbox:'
 
 // A stored outbox this old is deleted whatever key wrote it, so a rotated key's leftovers never fill the origin's quota.
@@ -39,6 +49,12 @@ const STALE_OUTBOX_MS = 30 * 24 * 3_600_000
 
 // Prop values the ingest API accepts.
 const PROP_VALUE_TYPES = new Set(['string', 'number', 'boolean'])
+
+// A caller's event_id must be a UUID, any version.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// The ingest API refuses a ts more than 10 years old or after 2095; 3,650 days stays safely inside.
+const TS_LIMITS = { maxAgeMs: 3_650 * 24 * 3_600_000, latestMs: Date.UTC(2095, 0, 1) }
 
 // Encodes strings to count their UTF-8 bytes.
 const utf8Encoder = new TextEncoder()
@@ -62,10 +78,24 @@ export class SimpleDataLogsClient {
   #random
   #timers
   #logger
+  #runtime
+  #globalScope
   #storage
   #storageKey
+  #isAsyncStorage = false
+  #isStorageLoaded = true
+  #storageLoad = null
+  #shouldDiscardStoredOutbox = false
+  #persistTimer = null
+  #isWriteRunning = false
+  #isWriteAgainNeeded = false
+  #runningWrite = null
   #shouldSendUserAgent
   #pageTargets
+  #processTarget
+  #defaultProps = {}
+  #release = null
+  #appStateListeners = []
   #outbox = []
   #outboxBytes = 0
   #inFlightEventIds = new Set()
@@ -87,12 +117,18 @@ export class SimpleDataLogsClient {
   #hasFlushed = false
   #warnedKinds = new Set()
   #removePageListeners = () => {}
+  #removeAppStateListener = () => {}
   #stopAutocapture = () => {}
+  #uninstallCrashHandlers = null
 
-  /** Reads the options, adopts any outbox a closed page left behind, and listens for page hide. */
+  /** Reads the options, adopts any outbox a closed page or app left behind, and listens for page hide or app state. */
   constructor(options = {}) {
+    // The runtime decides the defaults: storage, page listeners, crash capture and the User-Agent.
+    this.#globalScope = options.globalScope ?? globalThis
+    this.#runtime = resolveRuntime(options.runtime, this.#globalScope)
+
     // Trim copy-paste whitespace from the key; without one, nothing is ever sent.
-    this.#settings = { ...DEFAULT_SETTINGS, ...pickDefined(options, Object.keys(DEFAULT_SETTINGS)) }
+    this.#settings = { ...DEFAULT_SETTINGS, ...RUNTIME_SETTINGS[this.#runtime], ...pickDefined(options, Object.keys(DEFAULT_SETTINGS)) }
     this.#settings.ingestKey = typeof options.ingestKey === 'string' ? options.ingestKey.trim() : ''
     this.#currentMaxBatchEvents = this.#settings.maxBatchEvents
     this.#ingestUrl = `${String(this.#settings.endpoint).replace(/\/+$/, '')}/v1/ingest`
@@ -103,30 +139,37 @@ export class SimpleDataLogsClient {
     this.#random = options.random ?? Math.random
     this.#timers = options.timers ?? { setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis) }
     this.#logger = options.logger === undefined ? globalThis.console : options.logger
-    this.#shouldSendUserAgent = options.sendUserAgent ?? typeof globalThis.document === 'undefined'
+    this.#shouldSendUserAgent = options.sendUserAgent ?? this.#runtime === 'node'
     this.#deviceId = cleanIdentity(options.deviceId)
     this.#userId = cleanIdentity(options.userId)
+    this.#release = cleanIdentity(options.release)
+    this.#defaultProps = this.#scalarProps(options.defaultProperties)
 
     // Warn about keys that can't work, but keep running so the host never breaks.
     this.#warnAboutKey()
 
-    // Browser storage keeps unsent events across reloads; Node keeps them in memory.
-    this.#storage = options.storage === undefined ? defaultStorage() : options.storage
-    this.#storageKey = `${STORAGE_PREFIX}${this.#settings.ingestKey.slice(-12)}:${newEventId()}`
-    this.#adoptStoredOutboxes()
+    // Storage keeps unsent events across reloads and launches: localStorage, an async adapter, or memory.
+    this.#setUpStorage(options.storage === undefined ? defaultStorage(this.#runtime, this.#globalScope) : options.storage)
 
     // Flush on page hide in browsers, unless the host opts out.
-    this.#pageTargets = options.pageTargets === undefined ? defaultPageTargets() : options.pageTargets
+    this.#pageTargets = options.pageTargets === undefined ? defaultPageTargets(this.#runtime, this.#globalScope) : options.pageTargets
+    this.#processTarget = options.processTarget === undefined ? defaultProcessTarget(this.#runtime, this.#globalScope) : options.processTarget
     this.#listenForPageHide()
 
     // Send whatever a previous page load left behind.
     if (this.#outbox.length > 0) this.#scheduleFlush(0)
 
+    // With respectDoNotTrack, Do Not Track or Global Privacy Control is an opt-out for every send.
+    if (options.respectDoNotTrack === true && isDoNotTrackOn(this.#globalScope)) this.setEnabled(false)
+
     // Automatic capture is opt-in: `autocapture: true` or an object of flags.
     this.#startAutocapture(options)
+
+    // React Native's AppState: flush on background and, with autocapture, renew sessions.
+    this.#watchAppState(options.appState)
   }
 
-  /** Records an event with optional props, and an optional `{ timestamp }` for when it happened; never throws. */
+  /** Records an event with optional props, and optional `{ eventId, ts }` for idempotent re-sends and past events; never throws. */
   track(eventName, props, trackOptions) {
     this.#guard(() => {
       if (typeof eventName !== 'string' || eventName.trim() === '') {
@@ -134,21 +177,76 @@ export class SimpleDataLogsClient {
         return
       }
 
-      this.#enqueue({ event: eventName.trim(), ...this.#baseFields(trackOptions?.timestamp), ...this.#propsField(props) })
+      this.#enqueue({ event: eventName.trim(), ...this.#baseFields(trackOptions), ...this.#propsField(props) })
     })
   }
 
-  /** Records a log line with a level (debug, info, notice, warning, error, critical) and optional props; never throws. */
-  log(level, message, props) {
+  /** Records a log line with a level (debug, info, notice, warning, error, critical), optional props and `{ eventId, ts }`; never throws. */
+  log(level, message, props, logOptions) {
     this.#guard(() => {
       const levelText = typeof level === 'string' ? level.trim().toLowerCase() : ''
 
       this.#enqueue({
-        ...this.#baseFields(),
+        ...this.#baseFields(logOptions),
         ...(levelText === '' ? {} : { level: levelText }),
         message: message instanceof Error ? `${message.name}: ${message.message}` : String(message ?? ''),
         ...this.#propsField(props),
       })
+    })
+  }
+
+  /** Records an error as exception telemetry (type, message, stack frames), handled unless `{ handled: false }`; never throws. */
+  captureException(error, exceptionOptions) {
+    this.#guard(() => {
+      const options = exceptionOptions ?? {}
+
+      this.#enqueue({
+        kind: 'exception',
+        ...this.#baseFields(options),
+        ...exceptionFields(error, options),
+        ...(this.#release === null ? {} : { release: this.#release }),
+        ...this.#propsField(options.props),
+      })
+    })
+  }
+
+  /** Sends uncaught errors and unhandled rejections as unhandled exceptions (window, worker, React Native ErrorUtils or Node); returns the uninstall function. */
+  installGlobalHandlers() {
+    // A second call keeps the handlers already in place.
+    if (this.#uninstallCrashHandlers !== null) return this.#uninstallCrashHandlers
+
+    try {
+      const removeHandlers = installCrashHandlers(this, this.#crashContext())
+
+      this.#uninstallCrashHandlers = () => {
+        removeHandlers()
+        this.#uninstallCrashHandlers = null
+      }
+    } catch (error) {
+      this.#warnOnce('crash_handlers', `crash handlers could not be installed: ${error}`)
+      return () => {}
+    }
+
+    return this.#uninstallCrashHandlers
+  }
+
+  /** Tells the client about a React Native app state change: `background` flushes and saves, `active` may start a new session. */
+  handleAppStateChange(appStateValue) {
+    this.#guard(() => {
+      // Going to the background may be the last chance to send before the app is stopped.
+      if (appStateValue === 'background') {
+        this.#persistNow()
+        this.flush()
+      }
+
+      this.#appStateListeners.forEach((listener) => listener(appStateValue))
+    })
+  }
+
+  /** Replaces the props merged into every event, log line and exception; the event's own props win on a clash. */
+  setDefaultProperties(props) {
+    this.#guard(() => {
+      this.#defaultProps = this.#scalarProps(props)
     })
   }
 
@@ -173,12 +271,18 @@ export class SimpleDataLogsClient {
       this.#isEnabled = Boolean(isEnabled)
       if (this.#isEnabled) return
 
-      // Stop the timer and forget everything not yet delivered.
+      // Stop the timer and forget everything not yet delivered, including a stored outbox still loading.
       this.#cancelFlushTimer()
       this.#outbox = []
       this.#outboxBytes = 0
-      this.#persist()
+      if (!this.#isStorageLoaded) this.#shouldDiscardStoredOutbox = true
+      this.#persistNow()
     })
+  }
+
+  /** Where the client runs: browser, worker, react-native or node. */
+  get runtime() {
+    return this.#runtime
   }
 
   /** The number of events not yet confirmed by a 202. */
@@ -202,14 +306,16 @@ export class SimpleDataLogsClient {
     return this.#runningFlush
   }
 
-  /** Flushes once more, then stops timers and listeners; events tracked later are ignored. */
+  /** Flushes once more, then stops timers and listeners and saves what is left; events tracked later are ignored. */
   async shutdown() {
     await this.flush()
     this.#isShutDown = true
     this.#cancelFlushTimer()
     this.#removePageListeners()
+    this.#removeAppStateListener()
     this.#stopAutocapture()
-    this.#persist()
+    this.#uninstallCrashHandlers?.()
+    await this.#persistNow()
   }
 
   // Starts the opt-in autocapture features; a failure there never breaks the client.
@@ -219,15 +325,51 @@ export class SimpleDataLogsClient {
 
     try {
       this.#stopAutocapture = startAutocapture(this, flags, {
+        ...this.#crashContext(),
         pageTargets: this.#pageTargets,
-        processTarget: options.processTarget === undefined ? defaultProcessTarget() : options.processTarget,
         sessionStorage: options.sessionStorage,
         now: this.#now,
-        timers: this.#timers,
-        logger: this.#logger,
+        initialAppState: options.appState?.currentState,
+        addAppStateListener: (listener) => this.#addAppStateListener(listener),
       })
     } catch (error) {
       this.#warnOnce('autocapture', `autocapture could not start: ${error}`)
+    }
+  }
+
+  // What crash capture needs: the runtime, its scope and process, timers, the logger and a flush that saves first.
+  #crashContext() {
+    return {
+      runtime: this.#runtime,
+      scope: this.#pageTargets?.window ?? this.#globalScope,
+      processTarget: this.#processTarget,
+      timers: this.#timers,
+      logger: this.#logger,
+      flushBeforeExit: () => Promise.all([this.#persistNow(), this.flush()]),
+    }
+  }
+
+  // Subscribes to React Native's AppState (`appState: AppState`), so app state changes reach handleAppStateChange.
+  #watchAppState(appState) {
+    if (typeof appState?.addEventListener !== 'function') return
+
+    try {
+      const onAppStateChange = (appStateValue) => this.handleAppStateChange(appStateValue)
+      const subscription = appState.addEventListener('change', onAppStateChange)
+
+      // Newer React Native returns a subscription; older versions remove by listener.
+      this.#removeAppStateListener = () => (typeof subscription?.remove === 'function' ? subscription.remove() : appState.removeEventListener?.('change', onAppStateChange))
+    } catch (error) {
+      this.#warnOnce('app_state', `could not follow the app state: ${error}`)
+    }
+  }
+
+  // Adds an app state listener for autocapture and returns its remover.
+  #addAppStateListener(listener) {
+    this.#appStateListeners.push(listener)
+
+    return () => {
+      this.#appStateListeners = this.#appStateListeners.filter((kept) => kept !== listener)
     }
   }
 
@@ -240,22 +382,48 @@ export class SimpleDataLogsClient {
     }
   }
 
-  // The id, time and identity fields every event carries, set when it happens (or at the given timestamp).
-  #baseFields(timestamp) {
-    const happenedAt = timestamp instanceof Date || Number.isFinite(timestamp) ? new Date(timestamp) : new Date(this.#now())
-    const happenedAtMs = Number.isNaN(happenedAt.getTime()) ? this.#now() : happenedAt.getTime()
-
+  // The id, time and identity fields every event carries: a new id and now, or the caller's eventId and ts.
+  #baseFields(eventOptions) {
     return {
-      event_id: newEventId(),
-      ts: new Date(happenedAtMs).toISOString(),
+      event_id: this.#eventIdField(eventOptions?.eventId),
+      ts: new Date(this.#happenedAtMs(eventOptions?.ts ?? eventOptions?.timestamp)).toISOString(),
       ...(this.#deviceId === null ? {} : { device_id: this.#deviceId }),
       ...(this.#userId === null ? {} : { user_id: this.#userId }),
       ...(this.#sessionId === null ? {} : { session_id: this.#sessionId }),
     }
   }
 
-  // Keeps only string, finite number and boolean props, warning once about the rest.
+  // The caller's UUID event_id (lowercased) for an idempotent re-send, or a new one; anything else is replaced with a warning.
+  #eventIdField(eventId) {
+    if (eventId === undefined || eventId === null) return newEventId()
+    if (typeof eventId === 'string' && UUID_PATTERN.test(eventId.trim())) return eventId.trim().toLowerCase()
+
+    this.#warnOnce('event_id', 'eventId must be a UUID string; a new event_id was used')
+    return newEventId()
+  }
+
+  // When the event happened in epoch ms: the caller's Date, epoch ms or ISO text within the ingest API's range, else now.
+  #happenedAtMs(happenedAt) {
+    const nowMs = this.#now()
+    if (happenedAt === undefined || happenedAt === null) return nowMs
+
+    const happenedAtMs = happenedAt instanceof Date ? happenedAt.getTime() : typeof happenedAt === 'string' ? Date.parse(happenedAt) : Number.isFinite(happenedAt) ? happenedAt : NaN
+    const isInRange = Number.isFinite(happenedAtMs) && nowMs - happenedAtMs <= TS_LIMITS.maxAgeMs && happenedAtMs < TS_LIMITS.latestMs
+    if (isInRange) return happenedAtMs
+
+    this.#warnOnce('ts', 'ts must be a Date, epoch milliseconds or ISO 8601 text within the last 10 years; the current time was used')
+    return nowMs
+  }
+
+  // The default props with the event's own on top, as the props field, or nothing when both are empty.
   #propsField(props) {
+    const mergedProps = { ...this.#defaultProps, ...this.#scalarProps(props) }
+
+    return Object.keys(mergedProps).length === 0 ? {} : { props: mergedProps }
+  }
+
+  // Keeps only string, finite number and boolean props, warning once about the rest.
+  #scalarProps(props) {
     if (props === undefined || props === null) return {}
 
     if (typeof props !== 'object' || Array.isArray(props)) {
@@ -272,7 +440,7 @@ export class SimpleDataLogsClient {
       else this.#warnOnce('prop_value', `prop "${propName}" is not a string, finite number or boolean; it was skipped`)
     }
 
-    return Object.keys(keptProps).length === 0 ? {} : { props: keptProps }
+    return keptProps
   }
 
   // Adds one event to the outbox, then flushes at a full batch or schedules the interval flush.
@@ -310,8 +478,10 @@ export class SimpleDataLogsClient {
     if (droppedCount > 0) this.#warnOnce('outbox_full', `outbox over its cap; dropped the oldest ${droppedCount} unsent events`)
   }
 
-  // Sends batches until nothing unsent is left, a send fails, or sending is paused.
+  // Sends batches until nothing unsent is left, a send fails, or sending is paused; a stored outbox still loading is waited for.
   async #flushUntilEmpty() {
+    await this.#storageLoad
+
     while (this.#canSend() && this.#nextBatch(this.#settings.maxRequestBytes).length > 0) {
       const outcome = await this.#sendBatch({ isKeepalive: false })
       if (outcome === 'failed') return
@@ -420,6 +590,7 @@ export class SimpleDataLogsClient {
       const probeDelayMs = this.#invalidKeyProbeCount === 0 ? RETRY_POLICY.invalidKeyFirstProbeMs : RETRY_POLICY.invalidKeyProbeMs
       this.#invalidKeyProbeCount += 1
       this.#pausedUntilMs = this.#now() + honorRetryAfter(probeDelayMs, retryAfterMs)
+      this.#schedulePersist()
       return 'failed'
     }
 
@@ -428,10 +599,11 @@ export class SimpleDataLogsClient {
     return 'failed'
   }
 
-  // Pauses sending for a full-jitter backoff that is never shorter than Retry-After.
+  // Pauses sending for a full-jitter backoff that is never shorter than Retry-After; an async storage keeps the pause across launches.
   #backOff(retryAfterMs) {
     this.#failureCount += 1
     this.#pausedUntilMs = this.#now() + retryDelayMs(this.#failureCount, retryAfterMs, this.#random())
+    this.#schedulePersist()
   }
 
   // Removes the given events from the outbox and persists it.
@@ -514,10 +686,26 @@ export class SimpleDataLogsClient {
     }
   }
 
+  // Picks the storage path: Web Storage is read now, an async adapter in the background, and anything unusable means memory.
+  #setUpStorage(storage) {
+    const keyTail = this.#settings.ingestKey.slice(-12)
+
+    if (storage && !isUsableStorage(storage)) this.#warnOnce('storage_shape', 'storage needs getItem, setItem and removeItem; unsent events stay in memory')
+    this.#storage = isUsableStorage(storage) ? storage : null
+
+    if (isWebStorage(this.#storage)) {
+      this.#storageKey = `${STORAGE_PREFIX}${keyTail}:${newEventId()}`
+      this.#adoptStoredOutboxes()
+    } else if (this.#storage) {
+      this.#isAsyncStorage = true
+      this.#isStorageLoaded = false
+      this.#storageKey = `${STORAGE_PREFIX}${keyTail}`
+      this.#storageLoad = this.#loadAsyncOutbox()
+    }
+  }
+
   // Merges every stored outbox of this key (earlier page loads, closed tabs) into this one and deletes them; any key's outbox older than 30 days goes too.
   #adoptStoredOutboxes() {
-    if (!this.#storage) return
-
     try {
       const keyPrefix = `${STORAGE_PREFIX}${this.#settings.ingestKey.slice(-12)}:`
       const storedKeys = storageKeys(this.#storage).filter((storageKey) => storageKey.startsWith(STORAGE_PREFIX))
@@ -531,31 +719,93 @@ export class SimpleDataLogsClient {
         if (isOwn || this.#now() - savedAt > STALE_OUTBOX_MS) this.#storage.removeItem(storedKey)
       }
 
-      // The same event can sit in two stored outboxes; keep one copy.
-      const seenEventIds = new Set()
-      this.#outbox = this.#outbox.filter((entry) => !seenEventIds.has(entry.eventId) && seenEventIds.add(entry.eventId))
-      this.#outboxBytes = this.#outbox.reduce((sum, entry) => sum + entry.bytes, 0)
-      this.#trimOutbox()
+      this.#settleOutbox()
       this.#persist()
     } catch (error) {
       this.#warnOnce('storage_read', `could not read stored events: ${error}`)
     }
   }
 
-  // Persists once after the current turn's calls, so 10,000 track() calls write storage once, not 10,000 times.
-  #schedulePersist() {
-    if (!this.#storage || this.#isPersistQueued) return
+  // Reads the async storage's outbox and retry pause, puts the stored events ahead of anything tracked meanwhile, and saves the merge.
+  async #loadAsyncOutbox() {
+    let storedLineCount = 0
 
-    this.#isPersistQueued = true
-    queueMicrotask(() => {
-      this.#isPersistQueued = false
+    try {
+      const { lines, pausedUntilMs, failureCount } = readStoredOutbox(await this.#storage.getItem(this.#storageKey))
+      storedLineCount = lines.length
+
+      // An opt-out while loading deletes the stored events instead of adopting them.
+      if (this.#shouldDiscardStoredOutbox || !this.#isEnabled) {
+        this.#isStorageLoaded = true
+        await this.#storage.removeItem(this.#storageKey)
+        return
+      }
+
+      // Stored events are older, so they go first.
+      this.#outbox = [...lines.map((line) => outboxEntry(line)), ...this.#outbox]
+      this.#settleOutbox()
+
+      // A backoff or 401 pause from the last launch still holds, within the longest Retry-After.
+      const nowMs = this.#now()
+      this.#pausedUntilMs = Math.max(this.#pausedUntilMs, Math.min(pausedUntilMs, nowMs + RETRY_POLICY.maximumRetryAfterMs))
+      this.#failureCount = Math.max(this.#failureCount, failureCount)
+    } catch (error) {
+      this.#warnOnce('storage_read', `could not read stored events: ${error}`)
+    }
+
+    // Save the merged outbox, and send what the last launch left behind.
+    this.#isStorageLoaded = true
+    if (storedLineCount > 0 || this.#outbox.length > 0) this.#persist()
+    if (storedLineCount > 0) this.#scheduleFlush(0)
+  }
+
+  // Keeps one copy of each event (it can sit in two stored outboxes), recounts the bytes and applies the caps.
+  #settleOutbox() {
+    const seenEventIds = new Set()
+
+    this.#outbox = this.#outbox.filter((entry) => !seenEventIds.has(entry.eventId) && seenEventIds.add(entry.eventId))
+    this.#outboxBytes = this.#outbox.reduce((sum, entry) => sum + entry.bytes, 0)
+    this.#trimOutbox()
+  }
+
+  // Persists soon: Web Storage after the current turn's calls, an async storage at most once a second.
+  #schedulePersist() {
+    if (!this.#storage) return
+
+    // 10,000 track() calls in one turn write Web Storage once, not 10,000 times.
+    if (!this.#isAsyncStorage) {
+      if (this.#isPersistQueued) return
+
+      this.#isPersistQueued = true
+      queueMicrotask(() => {
+        this.#isPersistQueued = false
+        this.#persist()
+      })
+      return
+    }
+
+    // An async storage write is slower, so arrivals within a second share one write.
+    if (this.#persistTimer !== null) return
+
+    this.#persistTimer = this.#timers.setTimeout(() => {
+      this.#persistTimer = null
       this.#persist()
-    })
+    }, ASYNC_PERSIST_DELAY_MS)
+    this.#persistTimer?.unref?.()
+  }
+
+  // Persists at once, skipping any pending debounce; resolves when an async write is done.
+  #persistNow() {
+    if (this.#persistTimer !== null) this.#timers.clearTimeout(this.#persistTimer)
+    this.#persistTimer = null
+
+    return this.#persist()
   }
 
   // Writes the outbox with its save time, or removes it when empty; a write over the quota is skipped until the outbox shrinks.
   #persist() {
-    if (!this.#storage) return
+    if (!this.#storage) return undefined
+    if (this.#isAsyncStorage) return this.#writeAsyncOutbox()
 
     try {
       if (this.#outbox.length === 0) this.#storage.removeItem(this.#storageKey)
@@ -564,14 +814,58 @@ export class SimpleDataLogsClient {
       this.#failedPersistBytes = this.#outboxBytes
       this.#warnOnce('storage_write', `could not store unsent events, keeping them in memory: ${error}`)
     }
+
+    return undefined
   }
 
-  // Warns about a missing key, or a secret key in a browser.
+  // Writes the outbox and retry pause to an async storage, one write at a time, each with the latest state.
+  #writeAsyncOutbox() {
+    // Before the stored outbox is merged, a write would overwrite it; the load saves the merge itself.
+    if (!this.#isStorageLoaded) return this.#storageLoad
+
+    // A write already running writes again when it ends, so the last state always lands last.
+    if (this.#isWriteRunning) {
+      this.#isWriteAgainNeeded = true
+      return this.#runningWrite
+    }
+
+    this.#isWriteRunning = true
+    this.#runningWrite = (async () => {
+      try {
+        do {
+          this.#isWriteAgainNeeded = false
+          await this.#writeAsyncOutboxOnce()
+        } while (this.#isWriteAgainNeeded)
+      } catch (error) {
+        this.#failedPersistBytes = this.#outboxBytes
+        this.#warnOnce('storage_write', `could not store unsent events, keeping them in memory: ${error}`)
+      } finally {
+        this.#isWriteRunning = false
+      }
+    })()
+
+    return this.#runningWrite
+  }
+
+  // One async write: the record with its save time, retry pause and lines, or a removal when nothing waits.
+  async #writeAsyncOutboxOnce() {
+    if (this.#outbox.length === 0) {
+      await this.#storage.removeItem(this.#storageKey)
+      return
+    }
+
+    if (this.#outboxBytes >= this.#failedPersistBytes) return
+
+    const storedRecord = { savedAt: this.#now(), pausedUntilMs: this.#pausedUntilMs, failureCount: this.#failureCount, lines: this.#outbox.map((entry) => entry.line) }
+    await this.#storage.setItem(this.#storageKey, JSON.stringify(storedRecord))
+  }
+
+  // Warns about a missing key, or a secret key anywhere but a server.
   #warnAboutKey() {
     if (this.#settings.ingestKey === '') this.#warnOnce('missing_key', 'no ingestKey was given; nothing will be sent')
 
-    if (this.#settings.ingestKey.startsWith('sdl_sec_') && typeof globalThis.document !== 'undefined') {
-      this.#warnOnce('secret_key', 'a secret key (sdl_sec_) is in a web page; use a public key (sdl_pub_) in browsers')
+    if (this.#settings.ingestKey.startsWith('sdl_sec_') && this.#runtime !== 'node') {
+      this.#warnOnce('secret_key', 'a secret key (sdl_sec_) is in a page or app; use a public key (sdl_pub_) outside servers')
     }
   }
 
@@ -669,43 +963,26 @@ function pickDefined(options, allowedNames) {
   return Object.fromEntries(allowedNames.filter((name) => options[name] !== undefined).map((name) => [name, options[name]]))
 }
 
-// A stored outbox's save time and lines; the older bare-array form reads as saved now, and anything unreadable as empty.
+// A stored outbox's save time, lines and retry pause; the older bare-array form reads as saved now, and anything unreadable as empty.
 function readStoredOutbox(storedText) {
   try {
-    const storedValue = JSON.parse(storedText ?? '[]')
+    const storedValue = typeof storedText === 'string' ? JSON.parse(storedText) : (storedText ?? [])
     const isBareArray = Array.isArray(storedValue)
     const lines = isBareArray ? storedValue : Array.isArray(storedValue?.lines) ? storedValue.lines : []
     const savedAt = isBareArray || typeof storedValue?.savedAt !== 'number' ? Date.now() : storedValue.savedAt
 
-    return { savedAt, lines: lines.filter((line) => typeof line === 'string') }
+    return {
+      savedAt,
+      lines: lines.filter((line) => typeof line === 'string'),
+      pausedUntilMs: Number.isFinite(storedValue?.pausedUntilMs) ? storedValue.pausedUntilMs : 0,
+      failureCount: Number.isInteger(storedValue?.failureCount) && storedValue.failureCount > 0 ? storedValue.failureCount : 0,
+    }
   } catch {
-    return { savedAt: Date.now(), lines: [] }
+    return { savedAt: Date.now(), lines: [], pausedUntilMs: 0, failureCount: 0 }
   }
 }
 
 // Every key in a Web Storage object.
 function storageKeys(storage) {
   return Array.from({ length: storage.length ?? 0 }, (_, index) => storage.key(index)).filter((storageKey) => typeof storageKey === 'string')
-}
-
-// localStorage in browsers, when it is usable (private modes may throw); none in Node.
-function defaultStorage() {
-  if (typeof globalThis.document === 'undefined') return null
-
-  try {
-    return globalThis.localStorage ?? null
-  } catch {
-    return null
-  }
-}
-
-// The Node process, for opt-in crash capture; none in browsers.
-function defaultProcessTarget() {
-  const processTarget = globalThis.process
-  return typeof globalThis.document === 'undefined' && typeof processTarget?.on === 'function' ? processTarget : null
-}
-
-// window and document in browsers; none in Node.
-function defaultPageTargets() {
-  return typeof globalThis.document === 'undefined' ? null : { window: globalThis, document: globalThis.document }
 }

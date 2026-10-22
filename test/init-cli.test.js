@@ -111,7 +111,7 @@ test('Vue, Nuxt, SvelteKit and Expo get their own entry points', async (testCont
 
   const expoDir = copyFixture(testContext, 'expo')
   await runScripted(expoDir, ['--key', PUBLIC_KEY, '--yes'])
-  assert.match(readProjectFile(expoDir, 'simpledatalogs.ts'), /init\(\{ key: process\.env\.EXPO_PUBLIC_SIMPLEDATALOGS_KEY \}\)/)
+  assert.match(readProjectFile(expoDir, 'simpledatalogs.ts'), /import \{ AppState \} from 'react-native'[\s\S]*init\(\{ key: process\.env\.EXPO_PUBLIC_SIMPLEDATALOGS_KEY, appState: AppState, autocapture: true \}\)/)
 })
 
 test('plain HTML: one script tag before </head>, with the key and autocapture by the tag', async (testContext) => {

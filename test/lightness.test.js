@@ -3,16 +3,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { gzipSync } from 'node:zlib'
 
 import { createClient } from '../src/index.js'
 
-// The size budget for the source files, gzipped as a CDN would serve it.
-const MAX_GZIP_BYTES = 16_000
+// The size budget for every source file together, comments included, gzipped as a CDN would serve it.
+const MAX_GZIP_BYTES = 24_000
 
 test('the module is small, with no dependencies', async () => {
-  const source = Buffer.concat([await readFile(new URL('../src/index.js', import.meta.url)), await readFile(new URL('../src/autocapture.js', import.meta.url))])
+  const sourceDirectory = new URL('../src/', import.meta.url)
+  const sourceNames = (await readdir(sourceDirectory)).filter((fileName) => fileName.endsWith('.js'))
+  const source = Buffer.concat(await Promise.all(sourceNames.map((fileName) => readFile(new URL(fileName, sourceDirectory)))))
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   assert.ok(gzipSync(source).length < MAX_GZIP_BYTES, `gzipped size ${gzipSync(source).length} bytes`)

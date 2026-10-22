@@ -62,7 +62,7 @@ async function runBundleInPage(attributes) {
 test('the bundle is one small minified file', async () => {
   const bundle = await readFile(bundlePath)
 
-  assert.ok(gzipSync(bundle).length < 9_000, `gzipped size ${gzipSync(bundle).length} bytes`)
+  assert.ok(gzipSync(bundle).length < 10_000, `gzipped size ${gzipSync(bundle).length} bytes`)
   assert.doesNotMatch(bundle.toString(), /^\s*(import|export) /m)
   assert.match(bundle.toString(), new RegExp(SDK_VERSION.replaceAll('.', '\\.')))
 })
