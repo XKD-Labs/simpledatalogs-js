@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { SESSION_TIMEOUT_MS } from '../src/autocapture.js'
-import { detectRuntime } from '../src/runtime.js'
+import { detectRuntime, isDevelopmentBuild } from '../src/runtime.js'
 import { answer, makeHarness } from './harness.js'
 
 // A global scope as React Native has it: no document, navigator.product names the platform.
@@ -43,6 +43,31 @@ test('detectRuntime tells React Native, a page, a worker and Node apart', () => 
   assert.equal(detectRuntime(SERVICE_WORKER_SCOPE), 'worker')
   assert.equal(detectRuntime({ importScripts() {} }), 'worker')
   assert.equal(detectRuntime({ process: { on() {} } }), 'node')
+})
+
+test('isDevelopmentBuild: __DEV__, NODE_ENV, local hosts and unpacked extensions', () => {
+  assert.equal(isDevelopmentBuild('react-native', { __DEV__: true }), true)
+  assert.equal(isDevelopmentBuild('react-native', { __DEV__: false }), false)
+  assert.equal(isDevelopmentBuild('node', { process: { env: { NODE_ENV: 'development' } } }), true)
+  assert.equal(isDevelopmentBuild('node', { process: { env: {} } }), false)
+  assert.equal(isDevelopmentBuild('browser', { location: { hostname: 'localhost' } }), true)
+  assert.equal(isDevelopmentBuild('browser', { location: { hostname: 'shop.test' } }), true)
+  assert.equal(isDevelopmentBuild('browser', { location: { hostname: 'shop.example.com' } }), false)
+  assert.equal(isDevelopmentBuild('worker', { chrome: { runtime: { getManifest: () => ({}) } } }), true)
+  assert.equal(isDevelopmentBuild('worker', { chrome: { runtime: { getManifest: () => ({ update_url: 'https://clients2.google.com/service/update2/crx' }) } } }), false)
+})
+
+test('while developing, later batches go every 5 s', async () => {
+  const harness = makeHarness({ clientOptions: { globalScope: { process: { env: { NODE_ENV: 'development' }, on() {} } } } })
+
+  harness.client.track('first')
+  await harness.advance(1_000)
+  harness.client.track('second')
+  await harness.advance(4_999)
+  assert.equal(harness.requests.length, 1)
+
+  await harness.advance(1)
+  assert.equal(harness.requests.length, 2)
 })
 
 test('an extension service worker is not Node: no User-Agent, a 10 s interval and the secret key warning', async () => {

@@ -42,7 +42,7 @@ test('track sends an event with id, time, identity and scalar props; the first b
   assert.ok(harness.warnings.some((warning) => warning.includes('"nested"')))
 })
 
-test('after the first batch, later events wait for the 30 s interval', async () => {
+test('after the first batch, later events wait for the 10 s interval', async () => {
   const harness = makeHarness()
 
   harness.client.track('first')
@@ -50,7 +50,7 @@ test('after the first batch, later events wait for the 30 s interval', async () 
   assert.equal(harness.requests.length, 1)
 
   harness.client.track('second')
-  await harness.advance(29_999)
+  await harness.advance(9_999)
   assert.equal(harness.requests.length, 1)
 
   await harness.advance(1)

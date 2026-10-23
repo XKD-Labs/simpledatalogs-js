@@ -2,7 +2,7 @@
 
 import { isDoNotTrackOn, resolveAutocaptureFlags, startAutocapture } from './autocapture.js'
 import { exceptionFields, installCrashHandlers } from './exceptions.js'
-import { defaultPageTargets, defaultProcessTarget, defaultStorage, isUsableStorage, isWebStorage, resolveRuntime } from './runtime.js'
+import { defaultPageTargets, defaultProcessTarget, defaultStorage, isDevelopmentBuild, isUsableStorage, isWebStorage, resolveRuntime } from './runtime.js'
 
 export { chromeStorageAdapter } from './runtime.js'
 
@@ -12,11 +12,11 @@ export const SDK_VERSION = '0.5.0'
 /** The production ingest host. */
 export const DEFAULT_ENDPOINT = 'https://edge.simpledatalogs.com'
 
-// The ingest API sender defaults; the first batch goes after 1 s so a new setup shows data at once, then every 30 s or at 50 events, requests stay under 256 KB.
+// The ingest API sender defaults; the first batch goes after 1 s so a new setup shows data at once, then every 10 s or at 50 events, requests stay under 256 KB.
 const DEFAULT_SETTINGS = {
   endpoint: DEFAULT_ENDPOINT,
   firstFlushDelayMs: 1_000,
-  flushIntervalMs: 30_000,
+  flushIntervalMs: 10_000,
   maxBatchEvents: 50,
   maxRequestBytes: 256_000,
   maxKeepaliveBytes: 60_000,
@@ -25,8 +25,8 @@ const DEFAULT_SETTINGS = {
   requestTimeoutMs: 15_000,
 }
 
-// An extension's service worker is stopped after 30 idle seconds, so it sends every 10 s instead of every 30 s.
-const RUNTIME_SETTINGS = { worker: { flushIntervalMs: 10_000 } }
+// While the app is being developed, batches go every 5 s so new events show within seconds.
+const DEVELOPMENT_SETTINGS = { flushIntervalMs: 5_000 }
 
 // An async storage (AsyncStorage, chrome.storage) is written at most once a second while events arrive.
 const ASYNC_PERSIST_DELAY_MS = 1_000
@@ -128,7 +128,8 @@ export class SimpleDataLogsClient {
     this.#runtime = resolveRuntime(options.runtime, this.#globalScope)
 
     // Trim copy-paste whitespace from the key; without one, nothing is ever sent.
-    this.#settings = { ...DEFAULT_SETTINGS, ...RUNTIME_SETTINGS[this.#runtime], ...pickDefined(options, Object.keys(DEFAULT_SETTINGS)) }
+    const developmentSettings = isDevelopmentBuild(this.#runtime, this.#globalScope) ? DEVELOPMENT_SETTINGS : {}
+    this.#settings = { ...DEFAULT_SETTINGS, ...developmentSettings, ...pickDefined(options, Object.keys(DEFAULT_SETTINGS)) }
     this.#settings.ingestKey = typeof options.ingestKey === 'string' ? options.ingestKey.trim() : ''
     this.#currentMaxBatchEvents = this.#settings.maxBatchEvents
     this.#ingestUrl = `${String(this.#settings.endpoint).replace(/\/+$/, '')}/v1/ingest`

@@ -12,6 +12,25 @@ export function detectRuntime(globalScope = globalThis) {
   return 'node'
 }
 
+// Hosts that only ever serve a site under development.
+const DEVELOPMENT_HOST_PATTERN = /^(localhost|127\.0\.0\.1|\[::1\]|.+\.localhost|.+\.test|.+\.local)$/
+
+/** True while the host app is being developed: React Native's __DEV__, NODE_ENV=development, a local site, or an unpacked extension. */
+export function isDevelopmentBuild(runtime, globalScope = globalThis) {
+  try {
+    if (runtime === 'react-native') return globalScope.__DEV__ === true
+    if (runtime === 'node') return globalScope.process?.env?.NODE_ENV === 'development'
+
+    // An extension installed from a folder has no update_url in its manifest.
+    const manifest = globalScope.chrome?.runtime?.getManifest?.()
+    if (manifest) return !manifest.update_url
+
+    return DEVELOPMENT_HOST_PATTERN.test(globalScope.location?.hostname ?? '')
+  } catch {
+    return false
+  }
+}
+
 /** The `runtime` option when it names a known runtime, else the detected one. */
 export function resolveRuntime(runtimeOption, globalScope) {
   return RUNTIMES.includes(runtimeOption) ? runtimeOption : detectRuntime(globalScope)

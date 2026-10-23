@@ -70,7 +70,7 @@ sdl.installGlobalHandlers()
 
 ## Browser extensions (Manifest V3)
 
-- A service worker is detected as a worker, not Node: no `User-Agent` header, and a 10-second flush interval, since Chrome stops an idle worker after 30 seconds.
+- A service worker is detected as a worker, not Node: no `User-Agent` header.
 - With the `storage` permission, the outbox lives in `chrome.storage.local`, so events survive the worker being stopped. Popups and content scripts can opt in with `storage: chromeStorageAdapter(chrome.storage.local, 'popup:')`; the prefix keeps each context's outbox apart from the worker's.
 - Use a public key (`sdl_pub_…`); the SDK warns about a secret key outside servers.
 
@@ -126,7 +126,7 @@ One minified file (`dist/simpledatalogs.min.js`, ~9 KB gzipped) for sites withou
 ## Rules it follows
 
 - **Ids and times:** every event gets a UUID `event_id` and a `ts` when it happens, so retries never count twice.
-- **Batching:** a request goes out every 30 s, or at once at 50 events; each stays under 256 KB.
+- **Batching:** a request goes out every 10 s, or at once at 50 events; each stays under 256 KB. While you develop (a local site, an unpacked extension, React Native's `__DEV__`, or `NODE_ENV=development`) it goes every 5 s.
 - **Outbox:** an event leaves only after a `202`. In browsers it is kept in `localStorage`, so a reload or a closed tab sends it on the next page load; an extension's worker uses `chrome.storage.local`, React Native the async storage you pass, and Node keeps it in memory.
 - **Bounded on purpose:** browser storage is small and shared with your page, so the outbox holds at most 1,000 events or 2 MB (`maxOutboxEvents`, `maxOutboxBytes`). Only when that fills (for example a revoked key for hours) are the oldest unsent events dropped, with a warning. A single event over 256 KB can never be accepted and is dropped on `413`.
 - **Answers:** other statuses and network errors back off with full jitter from 1 s to 5 min, never sooner than `Retry-After`; `401` keeps the outbox and re-checks the key after 1 min, then every 10 min; `413` halves the batch and each `202` doubles it back to 50; `415` drops the batch with one warning (never resent unchanged).

@@ -4,6 +4,10 @@ All notable changes to the `simpledatalogs` npm package. The format follows [Kee
 
 ## [0.5.0] - Unreleased
 
+### Changed
+
+- Batches go every 10 s instead of 30 s, and every 5 s while you develop (a local site, an unpacked extension, React Native's `__DEV__`, or `NODE_ENV=development`), so new events show within seconds. `flushIntervalMs` still overrides it.
+
 ### Added
 
 - Async storage for the outbox: `storage` accepts an adapter whose `getItem`, `setItem` and `removeItem` return Promises, such as React Native's AsyncStorage. The stored outbox loads in the background and is merged ahead of events tracked meanwhile; writes are debounced to once a second and happen at once on background, crash and shutdown. The retry pause is stored too, so a relaunch keeps backing off.
