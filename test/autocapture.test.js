@@ -170,7 +170,7 @@ test('outbound link clicks are tracked only when turned on, and only for other h
 
   const clicks = await sentEvents(harness)
   assert.equal(clicks.length, 1)
-  assert.deepEqual(clicks[0].props, { url: 'https://partner.test/offer', host: 'partner.test', path: '/pricing' })
+  assert.deepEqual(clicks[0].props, { app_state: 'active', engaged_ms: 0, url: 'https://partner.test/offer', host: 'partner.test', path: '/pricing' })
 })
 
 test('data-track clicks send the named event with its data-track-* props and the path', async () => {
@@ -190,7 +190,7 @@ test('data-track clicks send the named event with its data-track-* props and the
   const clicks = await sentEvents(harness)
   assert.equal(clicks.length, 1)
   assert.equal(clicks[0].event, 'signup')
-  assert.deepEqual(clicks[0].props, { plan: 'pro', cta_place: 'hero', path: '/pricing' })
+  assert.deepEqual(clicks[0].props, { app_state: 'active', engaged_ms: 0, plan: 'pro', cta_place: 'hero', path: '/pricing' })
 })
 
 test('without sessions, only the first page view of a page load carries the referrer and UTM tags', async () => {

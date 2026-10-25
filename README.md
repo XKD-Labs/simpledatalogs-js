@@ -133,6 +133,7 @@ One minified file (`dist/simpledatalogs.min.js`, ~9 KB gzipped) for sites withou
 - **Light on the page (0.2.0):** `track()` never writes storage itself; the outbox is saved once per turn of the event loop, and after a quota error it is not written again until it shrinks. Page hide sends one `keepalive` request at a time. A stored outbox older than 30 days is deleted whatever key wrote it, so a rotated key's leftovers never fill the origin's storage.
 - **Page hide:** on `pagehide` or a hidden tab, one `fetch` with `keepalive` sends up to 60 KB. Anything unconfirmed stays stored and is resent later; `event_id` dedupes it.
 - **Light:** one file (~9 KB gzipped), no dependencies; `track()` only queues. In Node, batches of a flush go one at a time over one reused keep-alive connection (tested against a real server).
+- **Active and background:** in pages and React Native apps, events tracked now carry `app_state` (`active` while visible or in front, else `background`) and `engaged_ms` (foreground time since the previous event), so the Sessions tab can split active and passive sessions. Set `app_state: 'background'` yourself for background work; `activity: 'off'` sends neither.
 - **Fails open:** no call throws; problems are logged once each with `console.warn`.
 - **Opt-out:** `sdl.setEnabled(false)` deletes every unsent event and ignores new ones until `setEnabled(true)`.
 - **Node:** `await sdl.shutdown()` before the process exits. Use a secret key (`sdl_sec_…`) on servers, never in a web page.

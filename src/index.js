@@ -1,5 +1,6 @@
 /** simpledatalogs for browsers, workers, React Native and Node: batches events, log lines and exceptions to the ingest API and never blocks or breaks the host. */
 
+import { createActivityTracker, isAppStateActive, isPageVisible } from './activity.js'
 import { isDoNotTrackOn, resolveAutocaptureFlags, startAutocapture } from './autocapture.js'
 import { exceptionFields, installCrashHandlers } from './exceptions.js'
 import { defaultPageTargets, defaultProcessTarget, defaultStorage, isDevelopmentBuild, isUsableStorage, isWebStorage, resolveRuntime } from './runtime.js'
@@ -118,6 +119,7 @@ export class SimpleDataLogsClient {
   #warnedKinds = new Set()
   #removePageListeners = () => {}
   #removeAppStateListener = () => {}
+  #activity = null
   #stopAutocapture = () => {}
   #uninstallCrashHandlers = null
 
@@ -168,6 +170,9 @@ export class SimpleDataLogsClient {
 
     // React Native's AppState: flush on background and, with autocapture, renew sessions.
     this.#watchAppState(options.appState)
+
+    // Events say whether someone was using the page or app, unless `activity: 'off'`.
+    this.#watchActivity(options)
   }
 
   /** Records an event with optional props, and optional `{ eventId, ts }` for idempotent re-sends and past events; never throws. */
@@ -178,7 +183,11 @@ export class SimpleDataLogsClient {
         return
       }
 
-      this.#enqueue({ event: eventName.trim(), ...this.#baseFields(trackOptions), ...this.#propsField(props) })
+      // An event happening now carries app_state and engaged_ms; the caller's own props win.
+      const isHappeningNow = (trackOptions?.ts ?? trackOptions?.timestamp) === undefined
+      const activityProps = isHappeningNow && this.#activity !== null ? this.#activity.stamp(this.#now()) : {}
+
+      this.#enqueue({ event: eventName.trim(), ...this.#baseFields(trackOptions), ...this.#propsField(props, activityProps) })
     })
   }
 
@@ -239,6 +248,9 @@ export class SimpleDataLogsClient {
         this.#persistNow()
         this.flush()
       }
+
+      // Only `active` is in front; `inactive` and `background` are not.
+      if (this.#runtime === 'react-native') this.#activity?.setActive(isAppStateActive(appStateValue), this.#now())
 
       this.#appStateListeners.forEach((listener) => listener(appStateValue))
     })
@@ -365,6 +377,21 @@ export class SimpleDataLogsClient {
     }
   }
 
+  // Tracks the page's visibility in browsers, or React Native's AppState; Node and workers send no activity.
+  #watchActivity(options) {
+    if (options.activity === 'off') return
+
+    const documentTarget = this.#pageTargets?.document
+
+    if (this.#runtime === 'react-native' && options.appState) {
+      this.#activity = createActivityTracker(isAppStateActive(options.appState.currentState), this.#now())
+      return
+    }
+
+    // The page-hide listener already follows visibility and updates the tracker.
+    if (documentTarget) this.#activity = createActivityTracker(isPageVisible(documentTarget), this.#now())
+  }
+
   // Adds an app state listener for autocapture and returns its remover.
   #addAppStateListener(listener) {
     this.#appStateListeners.push(listener)
@@ -416,9 +443,9 @@ export class SimpleDataLogsClient {
     return nowMs
   }
 
-  // The default props with the event's own on top, as the props field, or nothing when both are empty.
-  #propsField(props) {
-    const mergedProps = { ...this.#defaultProps, ...this.#scalarProps(props) }
+  // The default props, then any stamped props, with the event's own on top, as the props field, or nothing when all are empty.
+  #propsField(props, stampedProps = {}) {
+    const mergedProps = { ...this.#defaultProps, ...stampedProps, ...this.#scalarProps(props) }
 
     return Object.keys(mergedProps).length === 0 ? {} : { props: mergedProps }
   }
@@ -675,6 +702,8 @@ export class SimpleDataLogsClient {
     const { window: windowTarget, document: documentTarget } = this.#pageTargets ?? {}
     const onPageHide = () => this.#flushOnPageHide()
     const onVisibilityChange = () => {
+      // The page's visibility is also whether someone is using it (app_state).
+      this.#activity?.setActive(isPageVisible(documentTarget), this.#now())
       if (documentTarget?.visibilityState === 'hidden') this.#flushOnPageHide()
     }
 

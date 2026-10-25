@@ -83,6 +83,8 @@ export interface ClientOptions {
   storage?: WebStorageLike | AsyncStorageLike | null
   /** React Native's `AppState`: flushes on background and renews sessions. */
   appState?: AppStateLike
+  /** `'auto'` (default) adds `app_state` and `engaged_ms` to events tracked now in pages and React Native apps; `'off'` sends neither. */
+  activity?: 'auto' | 'off'
   /** Overrides runtime detection. */
   runtime?: Runtime
   /** Whether to send `simpledatalogs-js/<version>` as the User-Agent; default true in Node only. */

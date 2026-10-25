@@ -10,6 +10,7 @@ All notable changes to the `simpledatalogs` npm package. The format follows [Kee
 
 ### Added
 
+- Active and passive sessions: in pages and React Native apps, every event tracked now carries `app_state` (`active` while the page is visible or the app is in front, else `background`) and, while active, `engaged_ms` (foreground time since the previous event). Your own `app_state` prop wins; back-dated events, log lines, Node and workers carry neither; `activity: 'off'` turns it off.
 - Async storage for the outbox: `storage` accepts an adapter whose `getItem`, `setItem` and `removeItem` return Promises, such as React Native's AsyncStorage. The stored outbox loads in the background and is merged ahead of events tracked meanwhile; writes are debounced to once a second and happen at once on background, crash and shutdown. The retry pause is stored too, so a relaunch keeps backing off.
 - `chromeStorageAdapter(chrome.storage.local)`, and an extension's service worker uses `chrome.storage.local` by default when it has the `storage` permission.
 - Runtime detection: a page, a worker (an extension's service worker), React Native and Node each get their own defaults. The `runtime` getter says which one is in use; the `runtime` option overrides it.
