@@ -48,7 +48,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test test/*.test.js",
     "build": "esbuild src/script-tag.js --bundle --minify --format=iife --target=es2022 --legal-comments=none --outfile=dist/simpledatalogs.min.js",
     "prepublishOnly": "npm run build && npm test"
   },

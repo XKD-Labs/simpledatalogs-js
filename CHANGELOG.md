@@ -6,6 +6,7 @@ All notable changes to the `simpledatalogs` npm package. The format follows [Kee
 
 ### Changed
 
+- `npm test` lets the shell expand the test glob, so the suite also runs on Node 18 and 20.
 - Batches go every 10 s instead of 30 s, and every 5 s while you develop (a local site, an unpacked extension, React Native's `__DEV__`, or `NODE_ENV=development`), so new events show within seconds. `flushIntervalMs` still overrides it.
 
 ### Added
