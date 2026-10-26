@@ -2,7 +2,7 @@
 
 All notable changes to the `simpledatalogs` npm package. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package uses [Semantic Versioning](https://semver.org/).
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-26
 
 ### Changed
 
@@ -30,7 +30,7 @@ All notable changes to the `simpledatalogs` npm package. The format follows [Kee
 - The secret key warning covers workers and React Native, not only web pages.
 - `npx simpledatalogs init` for Expo wires `AppState` and autocapture sessions.
 
-## [0.4.0] - Unreleased
+## [0.4.0] - Not published (shipped in 0.5.0)
 
 ### Added
 
